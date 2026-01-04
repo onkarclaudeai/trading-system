@@ -309,7 +309,7 @@ class DataGapFiller:
             
             # Import your watchlist generation logic
             try:
-                from analysis import intraday_options_watchlistimport intraday_options_watchlist
+                from analysis import intraday_options_watchlist
                 # Call with specific date parameter if your script supports it
                 # Otherwise, we'll skip this for now
                 logger.info(f"Watchlist generation for historical dates requires script modification")
