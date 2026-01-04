@@ -402,7 +402,7 @@ def generate_options_watchlist(metrics_df: pd.DataFrame,
     market_context = None
     if use_market_context and conn is not None:
         try:
-            from market_context_analyzer import analyze_market_context, should_take_trade
+            from analysis.market_context_analyzer import analyze_market_context, should_take_trade
             
             if trading_date is None:
                 trading_date = datetime.now().date()
@@ -608,7 +608,7 @@ def main(lookback_days: int = 15,
         # Add NSE symbols for Sharekhan
         if add_nse_symbols and len(watchlist) > 0:
             try:
-                from stock_symbol_mapper import SymbolMapper
+                from analysis.stock_symbol_mapper import SymbolMapper
                 logger.info("Adding NSE symbols for Sharekhan compatibility...")
                 mapper = SymbolMapper()
                 watchlist = mapper.batch_map(watchlist)
