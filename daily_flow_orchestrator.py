@@ -192,7 +192,7 @@ class DailyWorkflowV2:
         logger.info("Step 1.1: Downloading BSE Bhav Copy...")
         
         try:
-            import bse_bhav_downloader
+            from downloaders import bse_bhav_downloader
             
             # Download today's data only (more efficient)
             end_date = datetime.now()
@@ -214,7 +214,7 @@ class DailyWorkflowV2:
         logger.info("Step 2.1: Analyzing market context...")
         
         try:
-            import market_context_analyzer
+            from analysis import market_context_analyzer
             
             if hasattr(market_context_analyzer, 'main'):
                 market_context_analyzer.main()
@@ -234,7 +234,7 @@ class DailyWorkflowV2:
         logger.info("Step 2.2: Generating watchlist...")
         
         try:
-            import intraday_options_watchlist
+            from analysis import intraday_options_watchlist
             
             # Run with default settings
             watchlist = intraday_options_watchlist.main(
@@ -288,7 +288,7 @@ class DailyWorkflowV2:
             except ImportError:
                 # Fall back to old ML engine
                 logger.info("Using legacy ML engine...")
-                import ml_prediction_engine
+                from analysis import ml_prediction_engine
                 
                 if hasattr(ml_prediction_engine, 'adaptive_learning_cycle'):
                     ml_prediction_engine.adaptive_learning_cycle()
@@ -371,7 +371,7 @@ class DailyWorkflowV2:
         logger.info("Step 6.1: Tracking prediction accuracy...")
         
         try:
-            import watchlist_tracker
+            from tracking import watchlist_tracker
             
             tracker = watchlist_tracker.WatchlistTracker()
             
@@ -404,7 +404,7 @@ class DailyWorkflowV2:
         logger.info("Step 6.2: Running paper trading...")
         
         try:
-            import paper_trading_tracker
+            from trading import paper_trading_tracker
             
             tracker = paper_trading_tracker.PaperTradingTracker()
             
@@ -459,7 +459,7 @@ class DailyWorkflowV2:
         logger.info("Step 7.1: Checking data gaps...")
         
         try:
-            import gap_filler
+            from tracking import gap_filler
             
             filler = gap_filler.DataGapFiller()
             
