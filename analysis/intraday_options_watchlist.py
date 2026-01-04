@@ -623,7 +623,7 @@ def main(lookback_days: int = 15,
         # Add market context summary to report if available
         if use_market_context:
             try:
-                from market_context_analyzer import analyze_market_context, generate_market_report
+                from analysis.market_context_analyzer import analyze_market_context, generate_market_report
                 context = analyze_market_context(conn, datetime.now().date())
                 market_report = generate_market_report(context)
                 print("\n" + market_report + "\n")
@@ -660,7 +660,7 @@ def main(lookback_days: int = 15,
             
             if use_market_context:
                 try:
-                    from market_context_analyzer import analyze_market_context, generate_market_report
+                    from analysis.market_context_analyzer import analyze_market_context, generate_market_report
                     context = analyze_market_context(conn, datetime.now().date())
                     market_report = generate_market_report(context)
                     full_report = market_report + "\n\n" + report
