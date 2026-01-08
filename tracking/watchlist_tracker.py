@@ -3,6 +3,10 @@
 Watchlist Tracker - Patched for Column Compatibility
 Fixed to work with both 'direction' and 'predicted_direction' columns.
 Also handles 'options_score' vs 'combined_score'.
+
+FIXES APPLIED:
+- Convert Decimal to float before arithmetic operations
+- Convert NumPy types to Python native types before SQL insertion
 """
 
 import os
@@ -10,6 +14,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, execute_batch
 import pandas as pd
 import numpy as np
+from decimal import Decimal
 from datetime import datetime, timedelta
 import logging
 
@@ -28,6 +33,40 @@ DB_CONFIG = {
     'user': os.getenv('DB_USER', 'postgres'),
     'password': os.getenv('DB_PASSWORD', 'postgres')
 }
+
+
+def to_float(value):
+    """
+    Convert Decimal, numpy types, or other numeric types to Python float.
+    Returns 0.0 if conversion fails.
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (np.floating, np.integer)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def to_python_type(value):
+    """
+    Convert numpy types to Python native types for SQL insertion.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (np.floating, np.float64, np.float32)):
+        return float(value)
+    if isinstance(value, (np.integer, np.int64, np.int32)):
+        return int(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
 
 
 class WatchlistTracker:
@@ -238,7 +277,7 @@ class WatchlistTracker:
                 predicted_direction = self._get_direction(row)
                 
                 # Calculate target and stop loss if not provided
-                entry_price = float(row.get('close_price', row.get('close', 0)))
+                entry_price = to_float(row.get('close_price', row.get('close', 0)))
                 
                 if entry_price <= 0:
                     continue
@@ -286,15 +325,15 @@ class WatchlistTracker:
                         target_price,
                         stop_loss,
                         combined_score,
-                        row.get('options_score', combined_score),  # Use options_score if available
-                        row.get('momentum_score', row.get('momentum_3d', 0)),
-                        row.get('volume_ratio', 0),
-                        row.get('rsi', 0),
+                        to_float(row.get('options_score', combined_score)),
+                        to_float(row.get('momentum_score', row.get('momentum_3d', 0))),
+                        to_float(row.get('volume_ratio', 0)),
+                        to_float(row.get('rsi', 0)),
                         row.get('strategy_type', 'MOMENTUM'),
-                        row.get('momentum_3d', 0),
-                        row.get('atr_pct', 0),
-                        row.get('turnover_cr', 0),
-                        row.get('price_strength', 50),
+                        to_float(row.get('momentum_3d', 0)),
+                        to_float(row.get('atr_pct', 0)),
+                        to_float(row.get('turnover_cr', 0)),
+                        to_float(row.get('price_strength', 50)),
                         row.get('strike_suggestion', '')
                     ))
                 
@@ -359,14 +398,23 @@ class WatchlistTracker:
                     if not price_data:
                         continue
                     
-                    actual_open, actual_high, actual_low, actual_close, actual_volume = price_data
+                    # FIX: Convert all Decimal values to float
+                    actual_open = to_float(price_data[0])
+                    actual_high = to_float(price_data[1])
+                    actual_low = to_float(price_data[2])
+                    actual_close = to_float(price_data[3])
+                    actual_volume = int(price_data[4]) if price_data[4] else 0
                     
-                    # Calculate results
-                    entry = float(pred['entry_price'])
-                    target = float(pred['target_price'])
-                    stop = float(pred['stop_loss'])
+                    # FIX: Convert prediction values to float
+                    entry = to_float(pred['entry_price'])
+                    target = to_float(pred['target_price'])
+                    stop = to_float(pred['stop_loss'])
                     direction = pred['predicted_direction']
                     
+                    if entry <= 0:
+                        continue
+                    
+                    # Calculate results
                     if direction == 'BULLISH':
                         close_gain_pct = (actual_close - entry) / entry * 100
                         max_gain_pct = (actual_high - entry) / entry * 100
@@ -487,7 +535,7 @@ class WatchlistTracker:
             best_strategy = 'UNKNOWN'
             best_strategy_acc = 0
         
-        # Save summary
+        # FIX: Convert all numpy types to Python native types before SQL insertion
         upsert_query = """
         INSERT INTO accuracy_summary (
             summary_date, period_days, total_predictions, total_evaluated,
@@ -508,14 +556,23 @@ class WatchlistTracker:
         
         with self.conn.cursor() as cur:
             cur.execute(upsert_query, (
-                date, 30, total_predictions, len(df_1d),
+                date, 
+                30, 
+                int(total_predictions), 
+                int(len(df_1d)),
                 int(df_1d['correct_1d'].sum()) if len(df_1d) > 0 else 0,
                 int(df_3d['correct_3d'].sum()) if len(df_3d) > 0 else 0,
                 int(df_5d['correct_5d'].sum()) if len(df_5d) > 0 else 0,
-                accuracy_1d, accuracy_3d, accuracy_5d,
-                targets_hit, stops_hit,
-                high_acc, med_acc, low_acc,
-                best_strategy, best_strategy_acc
+                to_python_type(accuracy_1d), 
+                to_python_type(accuracy_3d), 
+                to_python_type(accuracy_5d),
+                to_python_type(targets_hit), 
+                to_python_type(stops_hit),
+                to_python_type(high_acc), 
+                to_python_type(med_acc), 
+                to_python_type(low_acc),
+                str(best_strategy) if best_strategy else 'UNKNOWN', 
+                to_python_type(best_strategy_acc)
             ))
         
         self.conn.commit()
@@ -599,8 +656,8 @@ class WatchlistTracker:
         # Statistical significance
         if summary['total_evaluated'] and summary['total_evaluated'] >= 30:
             expected = 0.5
-            observed = summary['direction_accuracy_1d'] / 100
-            n = summary['total_evaluated']
+            observed = float(summary['direction_accuracy_1d']) / 100
+            n = int(summary['total_evaluated'])
             
             se = np.sqrt(expected * (1 - expected) / n)
             z_score = (observed - expected) / se if se > 0 else 0
