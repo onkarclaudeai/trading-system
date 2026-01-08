@@ -2,12 +2,17 @@
 """
 Paper Trading Tracker - Patched for Column Compatibility
 Fixed to work with both 'direction' and 'predicted_direction' columns.
+
+FIXES APPLIED:
+- Added DROP TABLE IF EXISTS to recreate tables with correct schema
+- Convert Decimal to float before arithmetic operations
 """
 
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import pandas as pd
+from decimal import Decimal
 from datetime import datetime, timedelta
 import logging
 
@@ -28,15 +33,47 @@ DB_CONFIG = {
 }
 
 
+def to_float(value):
+    """
+    Convert Decimal or other numeric types to Python float.
+    Returns 0.0 if conversion fails.
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, Decimal):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class PaperTradingTracker:
     """Simple paper trading tracker for watchlist predictions."""
     
-    def __init__(self):
+    def __init__(self, recreate_tables=False):
+        """
+        Initialize tracker.
+        
+        Args:
+            recreate_tables: If True, drop and recreate tables (use if schema changed)
+        """
         self.conn = psycopg2.connect(**DB_CONFIG)
-        self.setup_tables()
+        self.setup_tables(recreate=recreate_tables)
     
-    def setup_tables(self):
+    def setup_tables(self, recreate=False):
         """Create paper trading tables if they don't exist."""
+        
+        if recreate:
+            logger.warning("Recreating paper trading tables (existing data will be lost)")
+            drop_queries = [
+                "DROP TABLE IF EXISTS trading_performance CASCADE;",
+                "DROP TABLE IF EXISTS paper_trades CASCADE;"
+            ]
+            with self.conn.cursor() as cur:
+                for query in drop_queries:
+                    cur.execute(query)
+            self.conn.commit()
         
         queries = [
             """
@@ -101,18 +138,36 @@ class PaperTradingTracker:
             );
             """,
             
-            """
-            CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);
-            CREATE INDEX IF NOT EXISTS idx_paper_trades_date ON paper_trades(entry_date);
-            CREATE INDEX IF NOT EXISTS idx_paper_trades_code ON paper_trades(sc_code);
-            """
+            "CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);",
+            "CREATE INDEX IF NOT EXISTS idx_paper_trades_date ON paper_trades(entry_date);",
+            "CREATE INDEX IF NOT EXISTS idx_paper_trades_code ON paper_trades(sc_code);"
         ]
         
         with self.conn.cursor() as cur:
             for query in queries:
-                cur.execute(query)
+                try:
+                    cur.execute(query)
+                except Exception as e:
+                    logger.warning(f"Table creation warning: {e}")
         self.conn.commit()
         logger.info("Paper trading tables ready")
+    
+    def check_table_schema(self):
+        """Check if table has required columns, recreate if not."""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'paper_trades' AND column_name = 'entry_date'
+                """)
+                if not cur.fetchone():
+                    logger.warning("paper_trades table missing entry_date column, recreating...")
+                    self.setup_tables(recreate=True)
+                    return True
+            return False
+        except Exception as e:
+            logger.error(f"Error checking schema: {e}")
+            return False
     
     def _get_direction(self, row):
         """
@@ -153,11 +208,14 @@ class PaperTradingTracker:
         for col in ['options_score', 'combined_score', 'combined_ml_score', 
                     'confidence_score', 'score', 'momentum_score']:
             if col in row.index and pd.notna(row[col]):
-                return float(row[col])
+                return to_float(row[col])
         return 50.0  # Default
     
     def enter_trades_from_watchlist(self, date=None):
         """Enter paper trades from today's watchlist."""
+        
+        # First check if table schema is correct
+        self.check_table_schema()
         
         if date is None:
             date = datetime.now().date()
@@ -208,7 +266,7 @@ class PaperTradingTracker:
                 # Get stock details
                 sc_code = row.get('sc_code', '')
                 sc_name = row.get('sc_name', '')
-                entry_price = float(row.get('close_price', row.get('close', 0)))
+                entry_price = to_float(row.get('close_price', row.get('close', 0)))
                 
                 if not sc_code or entry_price <= 0:
                     continue
@@ -317,19 +375,23 @@ class PaperTradingTracker:
                     logger.warning(f"No price data for {trade['sc_code']}")
                     continue
                 
-                current_price = float(price_data[0])
-                high_price = float(price_data[1])
-                low_price = float(price_data[2])
+                # FIX: Convert Decimal to float
+                current_price = to_float(price_data[0])
+                high_price = to_float(price_data[1])
+                low_price = to_float(price_data[2])
+                entry_price = to_float(trade['entry_price'])
+                quantity = int(trade['quantity']) if trade['quantity'] else 100
+                
+                if entry_price <= 0:
+                    continue
                 
                 # Calculate P&L
                 if trade['direction'] == 'BUY':
-                    pnl_percent = ((current_price - trade['entry_price']) / 
-                                 trade['entry_price']) * 100
-                    pnl_amount = (current_price - trade['entry_price']) * trade['quantity']
+                    pnl_percent = ((current_price - entry_price) / entry_price) * 100
+                    pnl_amount = (current_price - entry_price) * quantity
                 else:  # SELL
-                    pnl_percent = ((trade['entry_price'] - current_price) / 
-                                 trade['entry_price']) * 100
-                    pnl_amount = (trade['entry_price'] - current_price) * trade['quantity']
+                    pnl_percent = ((entry_price - current_price) / entry_price) * 100
+                    pnl_amount = (entry_price - current_price) * quantity
                 
                 # Calculate holding days
                 holding_days = (datetime.now().date() - trade['entry_date']).days
@@ -423,14 +485,14 @@ class PaperTradingTracker:
             losers = closed[closed['pnl_percent'] <= 0]
             
             win_rate = len(winners) / len(closed) * 100
-            avg_win = winners['pnl_percent'].mean() if len(winners) > 0 else 0
-            avg_loss = losers['pnl_percent'].mean() if len(losers) > 0 else 0
+            avg_win = to_float(winners['pnl_percent'].mean()) if len(winners) > 0 else 0
+            avg_loss = to_float(losers['pnl_percent'].mean()) if len(losers) > 0 else 0
             
-            total_pnl = closed['pnl_amount'].sum()
+            total_pnl = to_float(closed['pnl_amount'].sum())
             
             # Profit factor
-            gross_profit = winners['pnl_amount'].sum() if len(winners) > 0 else 0
-            gross_loss = abs(losers['pnl_amount'].sum()) if len(losers) > 0 else 1
+            gross_profit = to_float(winners['pnl_amount'].sum()) if len(winners) > 0 else 0
+            gross_loss = abs(to_float(losers['pnl_amount'].sum())) if len(losers) > 0 else 1
             profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
             
         else:
@@ -520,18 +582,18 @@ class PaperTradingTracker:
             print(f"Losers: {len(losers)} ({len(losers)/len(closed)*100:.1f}%)")
             
             print(f"\nPERFORMANCE:")
-            print(f"Total P&L: Rs {closed['pnl_amount'].sum():,.0f}")
-            print(f"Avg P&L per trade: Rs {closed['pnl_amount'].mean():,.0f}")
-            print(f"Best Trade: {closed['pnl_percent'].max():.2f}%")
-            print(f"Worst Trade: {closed['pnl_percent'].min():.2f}%")
-            print(f"Avg Winner: {winners['pnl_percent'].mean():.2f}%" if len(winners) > 0 else "Avg Winner: N/A")
-            print(f"Avg Loser: {losers['pnl_percent'].mean():.2f}%" if len(losers) > 0 else "Avg Loser: N/A")
+            print(f"Total P&L: Rs {to_float(closed['pnl_amount'].sum()):,.0f}")
+            print(f"Avg P&L per trade: Rs {to_float(closed['pnl_amount'].mean()):,.0f}")
+            print(f"Best Trade: {to_float(closed['pnl_percent'].max()):.2f}%")
+            print(f"Worst Trade: {to_float(closed['pnl_percent'].min()):.2f}%")
+            print(f"Avg Winner: {to_float(winners['pnl_percent'].mean()):.2f}%" if len(winners) > 0 else "Avg Winner: N/A")
+            print(f"Avg Loser: {to_float(losers['pnl_percent'].mean()):.2f}%" if len(losers) > 0 else "Avg Loser: N/A")
             
-            if len(losers) > 0 and losers['pnl_amount'].sum() != 0:
-                profit_factor = abs(winners['pnl_amount'].sum() / losers['pnl_amount'].sum())
+            if len(losers) > 0 and to_float(losers['pnl_amount'].sum()) != 0:
+                profit_factor = abs(to_float(winners['pnl_amount'].sum()) / to_float(losers['pnl_amount'].sum()))
                 print(f"Profit Factor: {profit_factor:.2f}")
             
-            print(f"Avg Holding Days: {closed['holding_days'].mean():.1f}")
+            print(f"Avg Holding Days: {to_float(closed['holding_days'].mean()):.1f}")
         
         # Current open positions
         if len(open_trades) > 0:
@@ -547,16 +609,17 @@ class PaperTradingTracker:
                     cur.execute(price_query, (trade['sc_code'],))
                     result = cur.fetchone()
                     if result:
-                        current_price = float(result[0])
-                        if trade['direction'] == 'BUY':
-                            current_pnl = ((current_price - trade['entry_price']) / 
-                                         trade['entry_price']) * 100
-                        else:
-                            current_pnl = ((trade['entry_price'] - current_price) / 
-                                         trade['entry_price']) * 100
+                        current_price = to_float(result[0])
+                        entry_price = to_float(trade['entry_price'])
                         
-                        days_held = (datetime.now().date() - trade['entry_date']).days
-                        print(f"  {trade['sc_code']}: {current_pnl:+.2f}% (Day {days_held})")
+                        if entry_price > 0:
+                            if trade['direction'] == 'BUY':
+                                current_pnl = ((current_price - entry_price) / entry_price) * 100
+                            else:
+                                current_pnl = ((entry_price - current_price) / entry_price) * 100
+                            
+                            days_held = (datetime.now().date() - trade['entry_date']).days
+                            print(f"  {trade['sc_code']}: {current_pnl:+.2f}% (Day {days_held})")
         
         print("\n" + "=" * 60)
     
@@ -572,7 +635,12 @@ def main():
     logger.info("Starting Paper Trading Tracker...")
     
     try:
-        tracker = PaperTradingTracker()
+        # First run with recreate_tables=True to fix schema if needed
+        tracker = PaperTradingTracker(recreate_tables=False)
+        
+        # Check and fix schema if needed
+        if tracker.check_table_schema():
+            logger.info("Table schema was fixed, continuing...")
         
         # Enter new trades from today's watchlist
         tracker.enter_trades_from_watchlist()
