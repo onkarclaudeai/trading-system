@@ -13,6 +13,12 @@ Workflow:
 7. Track previous predictions accuracy
 8. Paper trading updates
 9. Gap checking
+
+Environment Variables for Sharekhan API:
+    SHAREKHAN_API_KEY - Your Sharekhan API key
+    SHAREKHAN_SECRET_KEY - Your Sharekhan secret key
+    SHAREKHAN_CUSTOMER_ID - Your Sharekhan customer ID
+    SHAREKHAN_ACCESS_TOKEN - Access token (refresh daily via --login)
 """
 
 import os
@@ -304,38 +310,106 @@ class DailyWorkflowV2:
             # Non-critical, continue
     
     def generate_options_setups(self):
-        """Generate options trading setups with specific strikes."""
+        """
+        Generate options trading setups with specific strikes using Sharekhan API.
+        
+        Requires environment variables:
+            SHAREKHAN_API_KEY
+            SHAREKHAN_SECRET_KEY
+            SHAREKHAN_CUSTOMER_ID
+            SHAREKHAN_ACCESS_TOKEN
+        """
         logger.info("Step 4.1: Generating options trading setups...")
         
+        # Get Sharekhan credentials from environment
+        api_key = os.getenv('SHAREKHAN_API_KEY')
+        secret_key = os.getenv('SHAREKHAN_SECRET_KEY')
+        customer_id = os.getenv('SHAREKHAN_CUSTOMER_ID')
+        access_token = os.getenv('SHAREKHAN_ACCESS_TOKEN')
+        
         try:
-            # Try the new options integration module
+            # Try to import options_chain_collector
             try:
-                from options_integration_v2 import OptionsIntegration
+                from options_chain_collector import SharekhanOptionsCollector
+                import pandas as pd
                 
-                integration = OptionsIntegration(self.conn)
-                setups = integration.process_watchlist()
+                # Find today's watchlist file
+                date_str = self.workflow_date.strftime('%Y%m%d')
+                watchlist_file = None
                 
-                if setups is not None and len(setups) > 0:
-                    logger.info(f"[OK] Generated {len(setups)} options trading setups")
-                    self.results['options_setups'] = f'success: {len(setups)} setups'
+                for candidate in [f'options_watchlist_{date_str}.csv',
+                                  f'enhanced_watchlist_{date_str}.csv',
+                                  f'watchlist_{date_str}.csv']:
+                    if os.path.exists(candidate):
+                        watchlist_file = candidate
+                        break
+                
+                if not watchlist_file:
+                    logger.warning("[WARN] No watchlist file found for options setups")
+                    self.results['options_setups'] = 'skipped: no watchlist'
+                    return
+                
+                # Load watchlist
+                watchlist = pd.read_csv(watchlist_file)
+                watchlist.columns = watchlist.columns.str.lower().str.replace(' ', '_')
+                
+                logger.info(f"Processing {len(watchlist)} stocks for options setups")
+                
+                # Initialize collector with credentials
+                collector = SharekhanOptionsCollector(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    customer_id=customer_id,
+                    access_token=access_token
+                )
+                
+                # Authenticate if we have token
+                if access_token:
+                    if collector.authenticate():
+                        logger.info("Using live Sharekhan data")
+                    else:
+                        logger.info("Using estimated options data")
                 else:
-                    logger.info("[OK] No F&O stocks in watchlist")
+                    logger.info("No SHAREKHAN_ACCESS_TOKEN - using estimated data")
+                    logger.info("Run: python options_chain_collector.py --login")
+                
+                # Generate recommendations
+                recommendations = collector.get_trading_recommendations(watchlist)
+                
+                # Filter to F&O stocks only
+                fno_recs = recommendations[recommendations['has_options'] == True]
+                
+                if len(fno_recs) > 0:
+                    # Save to file
+                    output_file = f'options_setups_{date_str}.csv'
+                    fno_recs.to_csv(output_file, index=False)
+                    
+                    logger.info(f"[OK] Generated {len(fno_recs)} options setups")
+                    
+                    # Print top recommendations
+                    print("\n" + "=" * 70)
+                    print("TOP OPTIONS SETUPS")
+                    print("=" * 70)
+                    
+                    for _, row in fno_recs.head(5).iterrows():
+                        print(f"\n{row['nse_symbol']}: {row['recommendation']}")
+                        print(f"  Spot: ₹{row['spot_price']:.2f}")
+                        print(f"  Strike: ₹{row['strike']:.0f} {row['option_type']}")
+                        print(f"  Est. Premium: ₹{row['estimated_premium']:.2f}")
+                        print(f"  Lot Size: {row['lot_size']} | Capital: ₹{row['capital_required']:,.0f}")
+                    
+                    print("\n" + "=" * 70)
+                    
+                    self.results['options_setups'] = f'success: {len(fno_recs)} setups'
+                else:
+                    logger.info("[OK] No F&O stocks in today's watchlist")
                     self.results['options_setups'] = 'no F&O stocks'
                 
-                integration.cleanup()
-                
-            except ImportError:
-                # Fall back to options chain collector
-                logger.info("Options integration module not found, using basic collector...")
-                import options_chain_collector
-                
-                if hasattr(options_chain_collector, 'collect_all_fno_options'):
-                    options_chain_collector.collect_all_fno_options()
-                    logger.info("[OK] Options data collected (basic)")
-                    self.results['options_setups'] = 'success (basic)'
-                else:
-                    logger.warning("[WARN] Options collector not available")
-                    self.results['options_setups'] = 'skipped'
+            except ImportError as e:
+                # options_chain_collector not found
+                logger.warning(f"[WARN] options_chain_collector not available: {e}")
+                logger.info("Please copy options_chain_collector.py to trading-system directory")
+                self.results['options_setups'] = f'failed: {e}'
                     
         except Exception as e:
             logger.warning(f"[WARN] Options setup generation failed: {e}")
@@ -519,6 +593,7 @@ class DailyWorkflowV2:
             files_to_check = [
                 f"options_watchlist_{date_str}.csv",
                 f"enhanced_watchlist_{date_str}.csv",
+                f"options_setups_{date_str}.csv",
                 f"options_trading_sheet_{date_str}.csv",
                 f"options_trading_report_{date_str}.txt",
                 f"options_report_{date_str}.txt",
@@ -542,10 +617,12 @@ class DailyWorkflowV2:
                     if 'options_score' in df.columns:
                         report.append(f"  Avg confidence score: {df['options_score'].mean():.1f}")
                 
-                trading_file = f"options_trading_sheet_{date_str}.csv"
-                if os.path.exists(trading_file):
-                    df = pd.read_csv(trading_file)
+                setups_file = f"options_setups_{date_str}.csv"
+                if os.path.exists(setups_file):
+                    df = pd.read_csv(setups_file)
                     report.append(f"  Options setups generated: {len(df)}")
+                    fno_count = len(df[df['has_options'] == True]) if 'has_options' in df.columns else len(df)
+                    report.append(f"  F&O stocks with setups: {fno_count}")
                     
             except Exception as e:
                 report.append(f"  Could not load stats: {e}")
